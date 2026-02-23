@@ -38,33 +38,35 @@ jobs:
           TEST_LABELS: ${{ secrets.TEST_LABELS }}
           RSA_PRIVATE_KEY: ${{ secrets.RSA_PRIVATE_KEY }}
         run: |
-          # 1. Use git diff to find ONLY the .enc file added/changed in this specific PR
-          # We look at the difference between the base branch (main) and the current PR head
+          # 1. SMART DETECTION: Find the file added in THIS action
           if [ "${{ github.event_name }}" == "pull_request" ]; then
             SUBMISSION_FILE=$(git diff --name-only origin/main...HEAD | grep 'submissions/.*\.enc$' | head -n 1)
           else
-            SUBMISSION_FILE=$(find submissions -name "*.enc" | head -n 1)
+            # On Merge/Push, we look at the last commit specifically
+            SUBMISSION_FILE=$(git diff --name-only HEAD^ HEAD | grep 'submissions/.*\.enc$' | head -n 1)
+          fi
+
+          # Fallback: if git diff is empty, find the newest file
+          if [ -z "$SUBMISSION_FILE" ]; then
+            SUBMISSION_FILE=$(find submissions -name "*.enc" -printf '%T+ %p\n' | sort -r | head -n 1 | cut -d' ' -f2)
           fi
 
           if [ -z "$SUBMISSION_FILE" ]; then 
-            echo "ERROR: No submission file found in this PR."
+            echo "ERROR: No submission file found."
             exit 1
           fi
 
-          # 2. Derive team name from the folder path
           TEAM_NAME=$(basename $(dirname "$SUBMISSION_FILE"))
           echo "Detected Team: $TEAM_NAME"
           
-          # 3. Run evaluation
           python competition/evaluate.py --file "$SUBMISSION_FILE" | tee evaluation_output.txt
           
-          # 4. Extract score
           SCORE=$(grep "SCORE_MAE" evaluation_output.txt | awk '{print $2}')
           echo "score=$SCORE" >> $GITHUB_OUTPUT
           echo "team_name=$TEAM_NAME" >> $GITHUB_OUTPUT
 
       - name: Post Score to PR
-        # This ONLY runs on the Pull Request (Review Phase)
+        # ONLY runs during the Review Phase (PR)
         if: github.event_name == 'pull_request'
         uses: mshick/add-pr-comment@v2
         with:
@@ -76,69 +78,27 @@ jobs:
             ---
             *Note: The leaderboard will only be updated once a maintainer merges this Pull Request.*
 
-      - name: Update Leaderboard (Merge Phase)
-        # This ONLY runs when the code is pushed/merged to main
-        if: github.event_name == 'push' && steps.eval_step.outputs.score != ''
-        run: |
-          TEAM="${{ steps.eval_step.outputs.team_name }}"
-          SCORE="${{ steps.eval_step.outputs.score }}"
-          mkdir -p leaderboard
-          
-          # CSV Update Logic
-          if [ ! -f leaderboard/leaderboard.csv ]; then echo "Rank,Team,MAE" > leaderboard/leaderboard.csv; fi
-          echo "0,$TEAM,$SCORE" >> leaderboard/leaderboard.csv
-          
-          python3 -c "
-          import pandas as pd
-          df = pd.read_csv('leaderboard/leaderboard.csv')
-          
-          # Standardize column names
-          df.columns = [c.lower() for c in df.columns]
-          
-          # Clean data
-          df['mae'] = pd.to_numeric(df['mae'], errors='coerce')
-          df = df.dropna(subset=['mae'])
-          
-          # SORT: Lowest MAE first
-          df = df.sort_values('mae')
-          
-          # DENSE RANKING: (1, 1, 2, 3)
-          # 'dense' keeps the rank incrementing by 1 for the next unique value
-          df['rank'] = df['mae'].rank(method='dense').astype(int)
-          
-          # Reorder columns and save
-          df = df[['rank', 'team', 'mae']]
-          df.columns = [c.capitalize() for c in df.columns]
-          df.to_csv('leaderboard/leaderboard.csv', index=False)
-          "
-          
-          # Markdown Generation
-          echo "# 🏆 Competition Leaderboard" > leaderboard/LEADERBOARD.md
-          echo "Last updated: $(date -u)" >> leaderboard/LEADERBOARD.md
-          echo -e "\n| Rank | Team | MAE Score |\n|------|------|-----------|" >> leaderboard/LEADERBOARD.md
-          tail -n +2 leaderboard/leaderboard.csv | awk -F, '{printf "| %s | %s | %s |\n", $1, $2, $3}' >> leaderboard/LEADERBOARD.md
-
-      - name: Commit and Push Leaderboard
+      - name: Commit and Push Leaderboard (Merge Phase)
+        # ONLY runs during the Record-Keeping Phase (Merge to Main)
         if: github.event_name == 'push' && steps.eval_step.outputs.score != ''
         run: |
           git config user.name "Leaderboard Bot"
           git config user.email "actions@github.com"
           
-          # Capture current values
           TEAM="${{ steps.eval_step.outputs.team_name }}"
           SCORE="${{ steps.eval_step.outputs.score }}"
 
-          # 1. Sync with the absolute latest from main
+          # 1. Ensure we have the latest data before editing
           git fetch origin main
           git checkout main
           git reset --hard origin/main
           
-          # 2. Add the new entry to the fresh CSV
+          # 2. Update CSV
           mkdir -p leaderboard
           if [ ! -f leaderboard/leaderboard.csv ]; then echo "Rank,Team,MAE" > leaderboard/leaderboard.csv; fi
           echo "0,$TEAM,$SCORE" >> leaderboard/leaderboard.csv
           
-          # 3. Run the Dense Ranker (1,1,2,3)
+          # 3. Process Ranks with Python (Dense Ranking: 1, 1, 2, 3)
           python3 -c "
           import pandas as pd
           df = pd.read_csv('leaderboard/leaderboard.csv')
@@ -151,13 +111,13 @@ jobs:
           df.to_csv('leaderboard/leaderboard.csv', index=False)
           "
 
-          # 4. Regenerate Markdown 
+          # 4. Update Markdown Table
           echo "# 🏆 Competition Leaderboard" > leaderboard/LEADERBOARD.md
-          echo "Last updated: $(date -u)" >> leaderboard/LEADERBOARD.md
+          echo "Last updated: $(date -u) (UTC)" >> leaderboard/LEADERBOARD.md
           echo -e "\n| Rank | Team | MAE Score |\n|------|------|-----------|" >> leaderboard/LEADERBOARD.md
-          tail -n +2 leaderboard/leaderboard.csv | awk -F, '{printf "| %s | %s | %s |\n", $1, $2, $3}' >> leaderboard/LEADERBOARD.md
+          tail -n +2 leaderboard/leaderboard.csv | awk -F, '{printf "| %s | %s | %s |\n", \$1, \$2, \$3}' >> leaderboard/LEADERBOARD.md
           
-          # 5. Push the clean update
+          # 5. Push clean update
           git add leaderboard/
           git commit -m "Update leaderboard for $TEAM" || exit 0
           git push origin main
