@@ -123,18 +123,40 @@ jobs:
           git config user.name "Leaderboard Bot"
           git config user.email "actions@github.com"
           
-          # 1. Stash any local changes to ensure a clean pull
-          git stash
+          # Capture current values
+          TEAM="${{ steps.eval_step.outputs.team_name }}"
+          SCORE="${{ steps.eval_step.outputs.score }}"
+
+          # 1. Sync with the absolute latest from main
+          git fetch origin main
+          git checkout main
+          git reset --hard origin/main
           
-          # 2. Pull the latest main to sync with any recent merges/Pages updates
-          git pull origin main --rebase
+          # 2. Add the new entry to the fresh CSV
+          mkdir -p leaderboard
+          if [ ! -f leaderboard/leaderboard.csv ]; then echo "Rank,Team,MAE" > leaderboard/leaderboard.csv; fi
+          echo "0,$TEAM,$SCORE" >> leaderboard/leaderboard.csv
           
-          # 3. Pop the changes back and re-add them
-          git stash pop || echo "No stash to pop"
+          # 3. Run the Dense Ranker (1,1,2,3)
+          python3 -c "
+          import pandas as pd
+          df = pd.read_csv('leaderboard/leaderboard.csv')
+          df.columns = [c.lower() for c in df.columns]
+          df['mae'] = pd.to_numeric(df['mae'], errors='coerce')
+          df = df.dropna(subset=['mae']).sort_values('mae')
+          df['rank'] = df['mae'].rank(method='dense').astype(int)
+          df = df[['rank', 'team', 'mae']]
+          df.columns = [c.capitalize() for c in df.columns]
+          df.to_csv('leaderboard/leaderboard.csv', index=False)
+          "
+
+          # 4. Regenerate Markdown 
+          echo "# 🏆 Competition Leaderboard" > leaderboard/LEADERBOARD.md
+          echo "Last updated: $(date -u)" >> leaderboard/LEADERBOARD.md
+          echo -e "\n| Rank | Team | MAE Score |\n|------|------|-----------|" >> leaderboard/LEADERBOARD.md
+          tail -n +2 leaderboard/leaderboard.csv | awk -F, '{printf "| %s | %s | %s |\n", $1, $2, $3}' >> leaderboard/LEADERBOARD.md
           
-          # 4. Re-run the add/commit logic
+          # 5. Push the clean update
           git add leaderboard/
-          git commit -m "Update leaderboard for ${{ steps.eval_step.outputs.team_name }}" || exit 0
-          
-          # 5. Push with a retry loop or standard push
-          git push origin HEAD:main
+          git commit -m "Update leaderboard for $TEAM" || exit 0
+          git push origin main
