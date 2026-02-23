@@ -39,7 +39,10 @@ jobs:
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          # This adds the CSV/MD in the folder AND the HTML in the root
-          git add leaderboard/leaderboard.md leaderboard/leaderboard.csv leaderboard.html
-          git commit -m "Auto-update leaderboard [skip ci]" || exit 0
-          git push origin main
+          
+          # This adds everything in the leaderboard folder safely
+          git add leaderboard/
+          git add leaderboard.html
+          
+          # Only commit if there are actually changes to avoid 'nothing to commit' errors
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Auto-update leaderboard [skip ci]" && git push)
