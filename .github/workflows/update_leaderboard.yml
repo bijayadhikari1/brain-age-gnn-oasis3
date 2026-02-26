@@ -4,11 +4,13 @@ on:
   push:
     branches:
       - main
-    # Removed strict paths filter to ensure it catches every merge to main
-  workflow_dispatch: # Allows you to manually trigger via the Actions tab
+    paths-ignore:
+      - 'leaderboard/**'
+      - 'docs/**'
+  workflow_dispatch: 
 
 jobs:
-  build:
+  leaderboard_update:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -17,7 +19,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Fetches all history so git diff/commit works properly
+          fetch-depth: 0 
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -27,16 +29,14 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas pycryptodome tabulate
+          pip install pandas pycryptodome tabulate scikit-learn
 
-      - name: Debug Environment & Run Script
+      - name: Run Leaderboard Update
         env:
           TEST_LABELS: ${{ secrets.TEST_LABELS }}
           RSA_PRIVATE_KEY: ${{ secrets.RSA_PRIVATE_KEY }}
         run: |
-          echo "📂 Current working directory: $(pwd)"
-          echo "📁 Listing submissions folder:"
-          ls -R submissions/ || echo "Submissions folder not found"
+          # We pass the 'latest commit' info so the script knows what was merged
           python update_leaderboard.py
 
       - name: Commit and Push Changes
@@ -44,13 +44,12 @@ jobs:
           git config --local user.name "Leaderboard Bot"
           git config --local user.email "actions@github.com"
           
-          # Force add all generated files
-          git add -f leaderboard/leaderboard.csv leaderboard/LEADERBOARD.md docs/leaderboard.html
+          # Use -f to ensure files are tracked even if in .gitignore
+          git add -f leaderboard/leaderboard.csv leaderboard/LEADERBOARD.md docs/leaderboard.html || true
           
-          # Only commit if changes exist
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "Update Leaderboard [skip ci]"
+            git commit -m "🏆 Update Leaderboard [skip ci]"
             git push origin main
           fi

@@ -1,120 +1,169 @@
 import os
+import subprocess
 import pandas as pd
-import glob
 from io import StringIO
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import AES, PKCS1_OAEP
+from Crypto.Util.Padding import unpad
+
+def get_git_file_info():
+    """
+    Identifies files added in the last merge/push.
+    Returns a list of (timestamp, filepath, status)
+    """
+    try:
+        # Get status and names of files changed in the last commit/merge
+        # Status 'A' = Added, 'M' = Modified, 'D' = Deleted
+        raw_diff = subprocess.check_output(
+            ['git', 'diff', '--name-status', 'HEAD^', 'HEAD'], 
+            stderr=subprocess.STDOUT
+        ).decode('utf-8')
+        
+        changes = []
+        for line in raw_diff.splitlines():
+            if not line.strip(): continue
+            status, path = line.split(None, 1)
+            if path.endswith('.enc') and path.startswith('submissions/'):
+                changes.append({'path': path, 'status': status})
+        return changes
+    except Exception as e:
+        print(f"Git error: {e}")
+        return []
 
 def decrypt_file(encrypted_blob, private_key_str):
-    """Decrypts the .enc file content using RSA and AES."""
+    """Decrypts a .enc file using RSA and AES-CBC (matching your evaluate.py logic)."""
     try:
-        private_key = RSA.import_key(private_key_str)
+        private_key = RSA.import_key(private_key_str.strip())
+        
+        # 1. Extract session key size (first 2 bytes)
+        enc_session_key_size = int.from_bytes(encrypted_blob[:2], byteorder='big')
+        # 2. Extract encrypted session key
+        enc_session_key = encrypted_blob[2:2+enc_session_key_size]
+        # 3. Extract IV (16 bytes)
+        iv = encrypted_blob[2+enc_session_key_size : 2+enc_session_key_size+16]
+        # 4. Extract Ciphertext
+        ciphertext = encrypted_blob[2+enc_session_key_size+16:]
+        
+        # RSA Decrypt
         cipher_rsa = PKCS1_OAEP.new(private_key)
-        
-        # Split the blob into its components
-        k_len = private_key.size_in_bytes()
-        enc_session_key = encrypted_blob[:k_len]
-        nonce = encrypted_blob[k_len:k_len+16]
-        tag = encrypted_blob[k_len+16:k_len+32]
-        ciphertext = encrypted_blob[k_len+32:]
-        
-        # Decrypt session key and data
         session_key = cipher_rsa.decrypt(enc_session_key)
-        cipher_aes = AES.new(session_key, AES.MODE_EAX, nonce)
-        data = cipher_aes.decrypt_and_verify(ciphertext, tag)
-        return data.decode('utf-8')
+        
+        # AES Decrypt
+        cipher_aes = AES.new(session_key, AES.MODE_CBC, iv)
+        decrypted_raw = unpad(cipher_aes.decrypt(ciphertext), AES.block_size)
+        
+        return decrypted_raw.decode('utf-8')
     except Exception as e:
         print(f"Decryption error: {e}")
         return None
 
-def calculate_mae(ground_truth_df, prediction_df):
-    """Calculates Mean Absolute Error between ground truth and predictions."""
-    # Suffixes handle cases where both files have 'age_at_visit'
-    merged = pd.merge(ground_truth_df, prediction_df, on='subject_session', suffixes=('_gt', '_pred'))
+def calculate_mae(gt_df, pred_df):
+    """Calculates MAE with 8 decimal precision."""
+    # Standardize column names
+    gt_df.columns = gt_df.columns.str.lower().str.strip()
+    pred_df.columns = pred_df.columns.str.lower().str.strip()
     
+    merged = pd.merge(gt_df, pred_df, on='subject_session', suffixes=('_gt', '_pred'))
     if merged.empty:
-        print("⚠️ Warning: No matching subject_session found between GT and Prediction.")
         return None
     
-    # Check for exact column names after merge
-    gt_col = 'age_at_visit_gt'
-    pred_col = 'age_at_visit_pred'
-    
-    if gt_col in merged.columns and pred_col in merged.columns:
-        mae = (merged[gt_col] - merged[pred_col]).abs().mean()
-        return round(float(mae), 8)
-    else:
-        # Fallback: find columns containing 'age' if suffixes didn't match as expected
-        cols = merged.columns
-        gt_c = [c for c in cols if 'age' in c and 'gt' in c]
-        pr_c = [c for c in cols if 'age' in c and 'pred' in c]
-        if gt_c and pr_c:
-            mae = (merged[gt_c[0]] - merged[pr_c[0]]).abs().mean()
-            return round(float(mae), 8)
-        return None
+    mae = (merged['age_at_visit_gt'] - merged['age_at_visit_pred']).abs().mean()
+    return float(mae) # Keep as float, formatting happens at output
 
-# --- 1. CONFIGURATION & SECRETS ---
+# --- 1. CONFIGURATION ---
 gt_data = os.getenv('TEST_LABELS')
 priv_key = os.getenv('RSA_PRIVATE_KEY')
 
 if not gt_data or not priv_key:
-    print("❌ Error: Missing TEST_LABELS or RSA_PRIVATE_KEY secrets.")
+    print("❌ Error: Missing Secrets.")
     exit(1)
 
 gt_df = pd.read_csv(StringIO(gt_data))
-gt_df.columns = gt_df.columns.str.strip() 
 
-# --- 2. SCAN & DECRYPT SUBMISSIONS ---
-submission_files = []
-for root, dirs, files in os.walk("."):
-    for file in files:
-        if file.endswith(".enc"):
-            submission_files.append(os.path.join(root, file))
+# --- 2. SECURITY & FILE SELECTION ---
+changes = get_git_file_info()
 
-print(f"🔎 Found {len(submission_files)} .enc files: {submission_files}")
+# Check for tampering (Modified or Deleted files in submissions/)
+tampered = [c['path'] for c in changes if c['status'] != 'A']
+if tampered:
+    print(f"❌ SECURITY ERROR: The following existing files were tampered with: {tampered}")
+    print("Leaderboard update aborted.")
+    exit(1)
 
-leaderboard_data = []
-for file_path in submission_files:
+# Get only newly added files
+new_submissions = [c['path'] for c in changes if c['status'] == 'A']
+
+if not new_submissions:
+    print("ℹ️ No new submissions found in this push. Recalculating leaderboard from existing files...")
+    # Fallback to scanning folder if manually triggered or first run
+    new_submissions = [os.path.join(r, f) for r, d, fs in os.walk("submissions") for f in fs if f.endswith(".enc")]
+
+# If multiple new files, pick the latest one by git commit time
+if len(new_submissions) > 1:
+    print(f"⚠️ Multiple new files found: {new_submissions}. Selecting the most recent...")
+    latest_file_cmd = 'git log --diff-filter=A --format="%ct %H" --name-only HEAD^..HEAD | awk \'NF==2 {t=$1; next} /\.enc$/ {print t, $0}\' | sort -nr | head -n 1'
+    latest_output = subprocess.check_output(latest_file_cmd, shell=True).decode('utf-8')
+    selected_file = latest_output.split()[-1]
+    print(f"✅ Selected latest: {selected_file}")
+    target_files = [selected_file]
+else:
+    target_files = new_submissions
+
+# --- 3. PROCESSING ---
+leaderboard_path = 'leaderboard/leaderboard.csv'
+if os.path.exists(leaderboard_path):
+    current_df = pd.read_csv(leaderboard_path)
+else:
+    current_df = pd.DataFrame(columns=['Team', 'MAE'])
+
+for file_path in target_files:
     team_name = os.path.splitext(os.path.basename(file_path))[0]
     try:
         with open(file_path, 'rb') as f:
-            decrypted_csv = decrypt_file(f.read(), os.getenv('RSA_PRIVATE_KEY'))
+            decrypted_csv = decrypt_file(f.read(), priv_key)
+        
         if decrypted_csv:
             pred_df = pd.read_csv(StringIO(decrypted_csv))
-            score = calculate_mae(gt_df, pred_df)
-            if score is not None:
-                leaderboard_data.append({"TEAM": team_name, "MAE": score})
-                print(f"✅ Success: {team_name} scored {score}")
+            new_score = calculate_mae(gt_df, pred_df)
+            
+            if new_score is not None:
+                # Update logic: Only keep if better (lower MAE) or new team
+                if team_name in current_df['Team'].values:
+                    old_score = current_df.loc[current_df['Team'] == team_name, 'MAE'].values[0]
+                    if new_score < old_score:
+                        current_df.loc[current_df['Team'] == team_name, 'MAE'] = new_score
+                        print(f"🔥 New Personal Best for {team_name}: {new_score:.8f}")
+                    else:
+                        print(f"keep: {team_name}'s new score ({new_score:.8f}) was not better than existing ({old_score:.8f})")
+                else:
+                    new_row = pd.DataFrame({'Team': [team_name], 'MAE': [new_score]})
+                    current_df = pd.concat([current_df, new_row], ignore_index=True)
+                    print(f"✨ New Entry: {team_name} scored {new_score:.8f}")
+
     except Exception as e:
-        print(f"❌ Failed to process {team_name}: {e}")
-        
-# --- 3. RANKING & DEDUPLICATION ---
-if leaderboard_data:
-    df = pd.DataFrame(leaderboard_data)
-    df['MAE'] = pd.to_numeric(df['MAE'], errors='coerce')
-    df = df.dropna(subset=['MAE', 'TEAM'])
+        print(f"❌ Failed {team_name}: {e}")
 
-    # KEEP BEST SCORE PER TEAM
-    df = df.sort_values(by=['MAE']).drop_duplicates(subset=['TEAM'], keep='first')
-
-    # Final Rank Calculation
-    df = df.sort_values(by=["MAE", "TEAM"])
-    df['RANK'] = df['MAE'].rank(method='dense').astype(int)
+# --- 4. FINAL RANKING & EXPORT ---
+if not current_df.empty:
+    current_df['MAE'] = pd.to_numeric(current_df['MAE'])
+    current_df = current_df.sort_values(by='MAE', ascending=True)
+    current_df['Rank'] = current_df['MAE'].rank(method='dense').astype(int)
     
-    leaderboard_df = df[['RANK', 'TEAM', 'MAE']]
-    leaderboard_df.columns = ['Rank', 'Team', 'MAE']
-
-    # --- 4. OUTPUT GENERATION ---
+    # Reorder columns
+    final_df = current_df[['Rank', 'Team', 'MAE']]
+    
     os.makedirs('leaderboard', exist_ok=True)
     os.makedirs('docs', exist_ok=True)
-
-    # Save Files
-    leaderboard_df.to_csv('leaderboard/leaderboard.csv', index=False)
+    
+    # Save CSV with 8 decimals
+    final_df.to_csv(leaderboard_path, index=False, float_format='%.8f')
+    
+    # Save Markdown
     with open('leaderboard/LEADERBOARD.md', 'w') as f:
-        f.write("# 🏆 Competition Leaderboard\n\n" + leaderboard_df.to_markdown(index=False))
+        f.write("# 🏆 Competition Leaderboard\n\n" + final_df.to_markdown(index=False, floatfmt=".8f"))
 
-    # HTML with Bootstrap
-    html_table = leaderboard_df.to_html(
+    # HTML generation (Keep your existing Bootstrap styling)
+    html_table = final_df.to_html(
         classes='table table-hover text-center', 
         index=False,
         formatters={'MAE': lambda x: f"{x:.8f}"}
@@ -150,9 +199,11 @@ if leaderboard_data:
     </body>
     </html>
     """
+    # (Writing html_content to docs/leaderboard.html)
     with open('docs/leaderboard.html', 'w') as f:
-        f.write(html_content)
-    
-    print("🎉 Leaderboard updated successfully.")
+        f.write(html_content) 
+
+    print("🎉 Leaderboard files updated.")
+
 else:
     print("❌ No valid scores to display. Leaderboard not updated.")
