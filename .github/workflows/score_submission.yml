@@ -95,9 +95,10 @@ jobs:
           
           python update_leaderboard.py
           
-          # CRITICAL: Add the docs folder
-          git add leaderboard/
-          git add docs/
+          # SAFETY CHECK: Only add if the directories exist
+          if [ -d "leaderboard" ]; then git add leaderboard/; fi
+          if [ -d "docs" ]; then git add docs/; fi
           
+          # Use || exit 0 so it doesn't fail if there's nothing to commit
           git commit -m "Auto-update leaderboard [skip ci]" || exit 0
           git push origin main

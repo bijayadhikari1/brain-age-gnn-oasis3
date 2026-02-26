@@ -32,20 +32,19 @@ if os.path.exists(submissions_dir):
     for filename in os.listdir(submissions_dir):
         # We look specifically for .enc files
         if filename.endswith('.enc'):
-            # Extract Team Name from filename: "team_alpha.enc" -> "team_alpha"
             team_name = os.path.splitext(filename)[0]
             file_path = os.path.join(submissions_dir, filename)
             
             try:
-                # Read the .enc file (assuming it's formatted as a CSV)
-                pred_df = pd.read_csv(file_path)
+                # If these are encrypted, pd.read_csv will fail. 
+                # For now, we wrap it in a try/except so the script keeps running.
+                pred_df = pd.read_csv(file_path) 
                 score = calculate_mae(gt_df, pred_df)
-                
                 if score is not None:
-                    # Append this new/updated result to our data list
                     leaderboard_data.append({"TEAM": team_name, "MAE": score})
             except Exception as e:
-                print(f"Error processing {filename}: {e}")
+                # This prints the error to the logs but allows the script to finish
+                print(f"⚠️ Could not process {filename}. (Probably encrypted): {e}")
 
 # 4. Create Leaderboard (Deduplicate & Rerank All)
 if leaderboard_data:
