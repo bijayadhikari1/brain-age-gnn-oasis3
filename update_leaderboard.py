@@ -3,6 +3,7 @@ import pandas as pd
 from io import StringIO
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import AES, PKCS1_OAEP
+import glob
 
 def decrypt_file(encrypted_blob, private_key_str):
     """Decrypts the .enc file content using RSA and AES."""
@@ -35,7 +36,7 @@ def calculate_mae(ground_truth_df, prediction_df):
         print("⚠️ Warning: No matching subject_session found between GT and Prediction.")
         return None
     
-    # Try to find the age columns regardless of exact suffixing
+    # Check for exact column names after merge
     gt_col = 'age_at_visit_gt'
     pred_col = 'age_at_visit_pred'
     
@@ -43,7 +44,13 @@ def calculate_mae(ground_truth_df, prediction_df):
         mae = (merged[gt_col] - merged[pred_col]).abs().mean()
         return round(float(mae), 8)
     else:
-        print(f"⚠️ Warning: Missing age columns. Found: {list(merged.columns)}")
+        # Fallback: find columns containing 'age' if suffixes didn't match as expected
+        cols = merged.columns
+        gt_c = [c for c in cols if 'age' in c and 'gt' in c]
+        pr_c = [c for c in cols if 'age' in c and 'pred' in c]
+        if gt_c and pr_c:
+            mae = (merged[gt_c[0]] - merged[pr_c[0]]).abs().mean()
+            return round(float(mae), 8)
         return None
 
 # --- 1. CONFIGURATION & SECRETS ---
@@ -51,46 +58,51 @@ gt_data = os.getenv('TEST_LABELS')
 priv_key = os.getenv('RSA_PRIVATE_KEY')
 
 if not gt_data or not priv_key:
-    print("Error: Missing TEST_LABELS or RSA_PRIVATE_KEY secrets.")
+    print("❌ Error: Missing TEST_LABELS or RSA_PRIVATE_KEY secrets.")
     exit(1)
 
 gt_df = pd.read_csv(StringIO(gt_data))
 gt_df.columns = gt_df.columns.str.strip() 
 
 # --- 2. SCAN & DECRYPT SUBMISSIONS ---
-submissions_dir = 'submissions'
+# Use glob for recursive search in case files are nested
+submission_files = glob.glob('submissions/**/*.enc', recursive=True)
+print(f"🔎 Found {len(submission_files)} submission files.")
+
 leaderboard_data = []
 
-if os.path.exists(submissions_dir):
-    for filename in os.listdir(submissions_dir):
-        if filename.endswith('.enc'):
-            team_name = os.path.splitext(filename)[0]
-            file_path = os.path.join(submissions_dir, filename)
+for file_path in submission_files:
+    filename = os.path.basename(file_path)
+    team_name = os.path.splitext(filename)[0]
+    
+    print(f"🔄 Processing Team: {team_name} ({file_path})")
+    
+    try:
+        with open(file_path, 'rb') as f:
+            decrypted_csv = decrypt_file(f.read(), priv_key)
+        
+        if decrypted_csv:
+            pred_df = pd.read_csv(StringIO(decrypted_csv))
+            pred_df.columns = pred_df.columns.str.strip()
+            score = calculate_mae(gt_df, pred_df)
             
-            try:
-                with open(file_path, 'rb') as f:
-                    decrypted_csv = decrypt_file(f.read(), priv_key)
-                
-                if decrypted_csv:
-                    pred_df = pd.read_csv(StringIO(decrypted_csv))
-                    pred_df.columns = pred_df.columns.str.strip()
-                    score = calculate_mae(gt_df, pred_df)
-                    if score is not None:
-                        print(f"✅ Scored {team_name}: {score}")
-                        leaderboard_data.append({"TEAM": team_name, "MAE": score})
-                else:
-                    print(f"⚠️ Skipping {filename}: Decryption failed.")
-            except Exception as e:
-                print(f"⚠️ Error processing {filename}: {e}")
+            if score is not None:
+                print(f"✅ Scored {team_name}: {score:.8f}")
+                leaderboard_data.append({"TEAM": team_name, "MAE": score})
+            else:
+                print(f"❌ Calculation failed for {team_name}")
+        else:
+            print(f"⚠️ Decryption failed for {filename}")
+    except Exception as e:
+        print(f"⚠️ Error processing {filename}: {e}")
 
 # --- 3. RANKING & DEDUPLICATION ---
 if leaderboard_data:
     df = pd.DataFrame(leaderboard_data)
-    
     df['MAE'] = pd.to_numeric(df['MAE'], errors='coerce')
     df = df.dropna(subset=['MAE', 'TEAM'])
 
-    # Sort by MAE (best score first) then keep only the best entry per team
+    # KEEP BEST SCORE PER TEAM
     df = df.sort_values(by=['MAE']).drop_duplicates(subset=['TEAM'], keep='first')
 
     # Final Rank Calculation
@@ -104,12 +116,12 @@ if leaderboard_data:
     os.makedirs('leaderboard', exist_ok=True)
     os.makedirs('docs', exist_ok=True)
 
-    # Save CSV & Markdown
+    # Save Files
     leaderboard_df.to_csv('leaderboard/leaderboard.csv', index=False)
     with open('leaderboard/LEADERBOARD.md', 'w') as f:
-        f.write("# 🏆 Full Competition History\n\n" + leaderboard_df.to_markdown(index=False))
+        f.write("# 🏆 Competition Leaderboard\n\n" + leaderboard_df.to_markdown(index=False))
 
-    # Generate HTML
+    # HTML with Bootstrap
     html_table = leaderboard_df.to_html(
         classes='table table-hover text-center', 
         index=False,
@@ -131,14 +143,12 @@ if leaderboard_data:
             table {{ width: 100% !important; margin-bottom: 0 !important; }}
             th {{ background-color: #f8fafc !important; color: #64748b; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.05em; text-align: center; padding: 15px !important; }}
             td {{ vertical-align: middle; font-size: 1rem; padding: 15px !important; text-align: center; font-weight: 500; }}
-            .rank-col {{ font-weight: 700; color: #334155; }}
-            .mae-col {{ font-family: monospace; color: #059669; font-weight: 700; }}
         </style>
     </head>
     <body>
         <div class="leaderboard-card">
             <div class="header-section text-center">
-                <h1 class="fw-bold">🧠 Brain-Age Prediction Challenge Leaderboard</h1>
+                <h1 class="fw-bold">🧠 Brain-Age Prediction Leaderboard</h1>
                 <div class="badge bg-primary mt-2">Last Updated: {pd.Timestamp.now().strftime('%b %d, %H:%M UTC')}</div>
             </div>
             <div class="table-responsive">
@@ -151,6 +161,6 @@ if leaderboard_data:
     with open('docs/leaderboard.html', 'w') as f:
         f.write(html_content)
     
-    print("Leaderboard and HTML updated successfully.")
+    print("🎉 Leaderboard updated successfully.")
 else:
-    print("No valid submission files found to process.")
+    print("❌ No valid scores to display. Leaderboard not updated.")

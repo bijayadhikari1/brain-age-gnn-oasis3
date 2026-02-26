@@ -4,9 +4,8 @@ on:
   push:
     branches:
       - main
-    paths:
-      - 'submissions/*.enc'
-  workflow_dispatch:
+    # Removed strict paths filter to ensure it catches every merge to main
+  workflow_dispatch: # Allows you to manually trigger via the Actions tab
 
 jobs:
   build:
@@ -18,7 +17,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0 # Fetches all history so git diff/commit works properly
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -30,21 +29,28 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas pycryptodome tabulate
 
-      - name: Run Leaderboard Script
+      - name: Debug Environment & Run Script
         env:
           TEST_LABELS: ${{ secrets.TEST_LABELS }}
           RSA_PRIVATE_KEY: ${{ secrets.RSA_PRIVATE_KEY }}
-        run: python update_leaderboard.py
+        run: |
+          echo "📂 Current working directory: $(pwd)"
+          echo "📁 Listing submissions folder:"
+          ls -R submissions/ || echo "Submissions folder not found"
+          python update_leaderboard.py
 
       - name: Commit and Push Changes
         run: |
           git config --local user.name "Leaderboard Bot"
           git config --local user.email "actions@github.com"
           
-          # Only add directories if they exist to avoid 'pathspec' errors
-          if [ -d "leaderboard" ]; then git add leaderboard/; fi
-          if [ -d "docs" ]; then git add docs/; fi
+          # Stage the specific output files
+          git add leaderboard/LEADERBOARD.md leaderboard/leaderboard.csv docs/leaderboard.html || echo "No files to add"
           
-          # Commit only if there are changes; exit 0 prevents failure if nothing changed
-          git commit -m "Update Leaderboard [skip ci]" || exit 0
-          git push
+          # Only commit if there are actual differences in the staged files
+          if git diff --staged --quiet; then
+            echo "No changes to the leaderboard files. Skipping commit."
+          else
+            git commit -m "Update Leaderboard [skip ci]"
+            git push
+          fi
