@@ -5,19 +5,18 @@ on:
     branches:
       - main
     paths:
-      # CHANGE 1: Trigger when any .enc file is added to the submissions folder
       - 'submissions/*.enc'
   workflow_dispatch:
-
-permissions:
-  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -29,22 +28,23 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas tabulate
+          pip install pandas pycryptodome tabulate
 
       - name: Run Leaderboard Script
         env:
           TEST_LABELS: ${{ secrets.TEST_LABELS }}
+          RSA_PRIVATE_KEY: ${{ secrets.RSA_PRIVATE_KEY }}
         run: python update_leaderboard.py
 
-      - name: Commit and Push changes
+      - name: Commit and Push Changes
         run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
+          git config --local user.name "Leaderboard Bot"
+          git config --local user.email "actions@github.com"
           
-          # Use -f (force) or check if folder exists
+          # Only add directories if they exist to avoid 'pathspec' errors
           if [ -d "leaderboard" ]; then git add leaderboard/; fi
           if [ -d "docs" ]; then git add docs/; fi
           
-          # The "|| exit 0" tells GitHub: "If there's nothing to commit, don't fail"
-          git commit -m "Auto-update leaderboard [skip ci]" || exit 0
-          git push origin main
+          # Commit only if there are changes; exit 0 prevents failure if nothing changed
+          git commit -m "Update Leaderboard [skip ci]" || exit 0
+          git push
