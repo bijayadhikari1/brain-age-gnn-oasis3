@@ -51,5 +51,5 @@ jobs:
             echo "No changes to commit."
           else
             git commit -m "🏆 Update Leaderboard [skip ci]"
-            git push origin main
+            git push origin HEAD:main
           fi
