@@ -145,11 +145,19 @@ for file_path in target_files:
 
 # --- 4. FINAL RANKING & EXPORT ---
 if not current_df.empty:
-    current_df['MAE'] = pd.to_numeric(current_df['MAE'])
-    current_df = current_df.sort_values(by='MAE', ascending=True)
-    current_df['Rank'] = current_df['MAE'].rank(method='dense').astype(int)
+    # 1. Clean and Prepare Data
+    current_df['MAE'] = pd.to_numeric(current_df['MAE'], errors='coerce')
+    current_df = current_df.dropna(subset=['MAE'])
+
+    # 2. Sort and Rank
+    # We sort by MAE (primary) and Team (secondary for alphabetical stability)
+    current_df = current_df.sort_values(by=['MAE', 'Team'], ascending=[True, True])
     
-    # Reorder columns
+    # 'dense' method: ties get the same rank, next rank is +1 (1, 2, 2, 3)
+    # We round to 8 decimals before ranking to ensure identical scores match perfectly
+    current_df['Rank'] = current_df['MAE'].round(8).rank(method='dense').astype(int)
+    
+    # 3. Final selection and ordering
     final_df = current_df[['Rank', 'Team', 'MAE']]
     
     os.makedirs('leaderboard', exist_ok=True)
@@ -162,7 +170,7 @@ if not current_df.empty:
     with open('leaderboard/LEADERBOARD.md', 'w') as f:
         f.write("# 🏆 Competition Leaderboard\n\n" + final_df.to_markdown(index=False, floatfmt=".8f"))
 
-    # HTML generation (Keep your existing Bootstrap styling)
+    # HTML generation (with your Bootstrap styling)
     html_table = final_df.to_html(
         classes='table table-hover text-center', 
         index=False,
@@ -199,11 +207,9 @@ if not current_df.empty:
     </body>
     </html>
     """
-    # (Writing html_content to docs/leaderboard.html)
     with open('docs/leaderboard.html', 'w') as f:
         f.write(html_content) 
 
-    print("🎉 Leaderboard files updated.")
-
+    print("🎉 Leaderboard files updated with tied ranking support.")
 else:
-    print("❌ No valid scores to display. Leaderboard not updated.")
+    print("❌ No valid scores to display.")
