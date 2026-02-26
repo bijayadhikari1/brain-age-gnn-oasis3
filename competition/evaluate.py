@@ -94,7 +94,7 @@ def evaluate(submission_file_path):
     mae = mean_absolute_error(y_true, y_pred)
     
     # This print statement is what the Bot regex catches
-    print(f"SCORE_MAE: {round(mae, 5)}")
+    print(f"SCORE_MAE: {mae:.8f}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
