@@ -35,22 +35,24 @@ jobs:
           RSA_PRIVATE_KEY: ${{ secrets.RSA_PRIVATE_KEY }}
         run: |
           # 1. Force the runner to fetch the files from the PR branch
-          # This is the missing piece that makes the files visible to 'ls'
           git fetch origin pull/${{ github.event.pull_request.number }}/head:pr_branch
           git checkout pr_branch -- submissions/
 
-          # 2. Find the submission file (excluding the sample if others exist)
-          # This ensures we prioritize the actual team submission
-          FILES=$(ls submissions/*.enc | grep -v "sample_submission.enc" || ls submissions/sample_submission.enc 2>/dev/null || true)
+          # 2. Find the submission file (Ignoring the sample file)
+          # We look for any .enc that IS NOT sample_submission.enc
+          FILE=$(ls submissions/*.enc | grep -v "sample_submission.enc" | head -n 1)
+          
+          # 3. Fallback: If ONLY the sample exists, use it
+          if [ -z "$FILE" ]; then 
+            FILE=$(ls submissions/sample_submission.enc 2>/dev/null || true)
+          fi
 
-          if [ -z "$FILES" ]; then
+          if [ -z "$FILE" ]; then
             echo "score=No New Submission" >> $GITHUB_OUTPUT
-            echo "multi_note=ℹ️ No .enc submission files found in the submissions directory." >> $GITHUB_OUTPUT
+            echo "multi_note=ℹ️ No .enc submission files found." >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          # 3. Select the file (latest by modification time)
-          FILE=$(ls -t submissions/*.enc | head -n 1)
           echo "Selected file: $FILE"
 
           # 4. Prepare metadata for the PR comment
@@ -71,6 +73,7 @@ jobs:
             FORMATTED_SCORE=$(printf "%.8f" $RAW_SCORE)
             echo "score=$FORMATTED_SCORE" >> $GITHUB_OUTPUT
           fi
+          
 
       - name: Post Score to PR
         uses: mshick/add-pr-comment@v2
